@@ -1,0 +1,26 @@
+# API keys - never commit (copy secrets.example.json to secrets.json)
+secrets.json
+cardos_secrets.json
+
+# Build output and local tools
+build/
+tools/mpyx/
+__pycache__/
+*.pyc
+
+# Personal device backups
+backup/
+
+# Early experiments from before CardOS
+file_manager.py
+image_browser.py
+sd_probe.py
+show_image.py
+wifi_connect.py
+
+# Editor / OS clutter
+.vscode/
+.idea/
+.claude/
+Thumbs.db
+.DS_Store
