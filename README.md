@@ -4,6 +4,8 @@
 
 CardOS turns the Cardputer ADV into a pocket computer with a home screen, a status bar and apps you open with the keyboard. It is written in MicroPython and runs on the Cardputer's standard UIFlow2 firmware, so you don't need to flash anything custom. One command installs everything.
 
+> Only want the cricket scores, without the home screen and other apps? Use **[NPL Cricket for Cardputer ADV](https://github.com/tusharrayamajhi/npl-cricket-cardputer)**. It boots straight into the app.
+
 <!-- Demo: drag your screen recording into this README on GitHub to embed it here -->
 
 ```
@@ -147,10 +149,11 @@ Done! CardOS starts in a few seconds.
 | Command | What it does |
 |---|---|
 | `python install.py --check` | Only run the checks. Changes nothing. |
+| `python install.py --wifi` | Set the WiFi name and password from the computer, then reboot (or use the Settings app) |
 | `python install.py --port COM5` | Use a specific port (`/dev/ttyACM0` on Linux, `/dev/cu.usbmodem…` on macOS) |
 | `python install.py --no-sd` | Install without an SD card. NPL team pages and photos won't be available. |
 | `python install.py --no-reset` | Don't reboot at the end |
-| `python install.py --restore` | Uninstall: put back your old `main.py` and the UIFlow start menu |
+| `python install.py --restore` | Uninstall: put back your old `main.py` and how the Cardputer started before |
 
 ### 4. Connect to WiFi
 
@@ -266,7 +269,8 @@ CardOS/
 └── tools/
     ├── npl_logos.py      PNG logos  → res/npl/*.bmp at every size
     ├── npl_teams.py      Wikipedia  → sd/npl/<TEAM>/team.json + captain.jpg
-    └── npl_seed.py       pre-builds the season cache on the PC
+    ├── npl_seed.py       pre-builds the season cache on the PC
+    └── make_npl_repo.py  builds the NPL-only repo from this one (with standalone/)
 ```
 
 **Rebuild the NPL data** (for example, for a new season):

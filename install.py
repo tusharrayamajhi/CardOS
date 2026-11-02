@@ -1,11 +1,15 @@
-"""Install CardOS (and the NPL Cricket app) on an M5Stack Cardputer ADV.
+"""Install CardOS, or the NPL Cricket app on its own, on an M5Stack Cardputer ADV.
 
     python install.py              check the device, then install and reboot
     python install.py --check      only run the checks, change nothing
+    python install.py --wifi       only change the WiFi name and password, then reboot
     python install.py --port COM5  use this serial port (default: auto-detect)
     python install.py --no-sd      install without the SD card files
     python install.py --no-reset   don't reboot when done
-    python install.py --restore    put back the main.py that was there before CardOS
+    python install.py --restore    put back the main.py that was there before
+
+The same file ships in both repos: next to cardos/ + apps/ it installs CardOS,
+next to nplkit/ it installs NPL Cricket on its own.
 
 Needs Python 3.8+ on the computer and UIFlow2 firmware on the Cardputer ADV.
 mpremote and mpy-cross are installed into tools/mpyx (not system-wide) if missing.
@@ -17,11 +21,15 @@ import subprocess
 import sys
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
+LIB = "cardos" if os.path.isdir(os.path.join(ROOT, "cardos")) else "nplkit"
+PRODUCT = "CardOS" if LIB == "cardos" else "NPL Cricket"
+HAS_APPS = os.path.isdir(os.path.join(ROOT, "apps"))
 TOOLS = os.path.join(ROOT, "tools", "mpyx")
 BUILD = os.path.join(ROOT, "build")
 MPY_CROSS = "mpy-cross==1.27.0.post2"   # matches UIFlow2 2.5.x (MicroPython 1.27)
 ESPRESSIF_VID = 0x303A                  # USB vendor id of the ESP32-S3
-BACKUP = "/flash/main_before_cardos.py"
+BACKUP = "/flash/main_before_%s.py" % LIB
+BACKUP_BOOT = "/flash/main_before_%s.boot" % LIB   # UIFlow boot option from before
 SECRETS = os.path.join(ROOT, "secrets.json")
 
 # Runs on the Cardputer: reports what we need to know as one JSON line.
@@ -45,6 +53,10 @@ try:
     r['main'] = open('/flash/main.py').read(300)
 except OSError:
     r['main'] = None
+try:
+    r['wifi'] = __import__('esp32').NVS('uiflow').get_str('ssid0')
+except Exception:
+    r['wifi'] = None
 try:
     os.stat('%s')
     r['backup'] = True
@@ -125,7 +137,7 @@ def ensure_tools():
             missing.append(pkg)
     if missing:
         say("Installing %s into tools/mpyx ..." % ", ".join(missing))
-        r = subprocess.run([sys.executable, "-m", "pip", "install", "--quiet",
+        r = subprocess.run([sys.executable, "-m", "pip", "install", "--quiet", "--disable-pip-version-check",
                             "--target", TOOLS] + missing)
         if r.returncode:
             fail("Could not install " + ", ".join(missing),
@@ -207,12 +219,12 @@ def check_device(info, mpy_files, need_flash, need_sd, use_sd):
     ok("Firmware: %s (UIFlow2)" % info["version"])
     if not info["adv"]:
         fail("Cardputer ADV keyboard not found.",
-             "CardOS supports the Cardputer ADV only. The original Cardputer has a\n"
-             "different keyboard and won't work yet.")
+             "%s supports the Cardputer ADV only. The original Cardputer has a\n"
+             "different keyboard and won't work yet." % PRODUCT)
     ok("Board: Cardputer ADV")
     want = compiled_header(mpy_files)
     if info["mpy"] & 0xFF != want & 0xFF or (want >> 8 and info["mpy"] >> 8 != want >> 8):
-        fail("MicroPython version mismatch (device mpy 0x%x, CardOS built for 0x%x)." % (info["mpy"], want),
+        fail("MicroPython version mismatch (device mpy 0x%x, %s built for 0x%x)." % (info["mpy"], PRODUCT, want),
              "Update the Cardputer to the latest UIFlow2 for Cardputer (MicroPython 1.27)\n"
              "with M5Burner, then run the installer again.")
     ok("MicroPython version matches")
@@ -239,9 +251,13 @@ def rel(path):
 
 
 def compile_all():
-    """Compile cardos/*.py -> build/cardos and apps/*.py -> build/mpy."""
+    """Compile <lib>/*.py -> build/<lib> and apps/*.py -> build/mpy.
+    Returns (lib .mpy files, app .mpy files)."""
     out = []
-    for src, dst in (("cardos", "cardos"), ("apps", "mpy")):
+    for src, dst in ((LIB, LIB), ("apps", "mpy")):
+        if not os.path.isdir(os.path.join(ROOT, src)):
+            out.append([])
+            continue
         d = os.path.join(BUILD, dst)
         os.makedirs(d, exist_ok=True)
         for f in os.listdir(d):
@@ -270,12 +286,14 @@ def tree(folder):
             yield p, os.path.relpath(p, base).replace("\\", "/")
 
 
-def plan_files(os_mpys, app_mpys, use_sd):
+def plan_files(lib_mpys, app_mpys, use_sd):
     """[(local, remote)] for flash, and for the SD card."""
-    flash = [(p, "/flash/libs/cardos/" + os.path.basename(p)) for p in os_mpys]
-    flash += [(os.path.join(ROOT, "apps", f), "/flash/apps/" + f)
-              for f in sorted(os.listdir(os.path.join(ROOT, "apps"))) if f.endswith(".py")]
-    flash += [(p, "/flash/apps/mpy/" + os.path.basename(p)) for p in app_mpys]
+    flash = [(p, "/flash/libs/%s/%s" % (LIB, os.path.basename(p))) for p in lib_mpys]
+    if HAS_APPS:
+        # apps keep their .py (the launcher reads NAME/ICON from it) and load the .mpy
+        flash += [(os.path.join(ROOT, "apps", f), "/flash/apps/" + f)
+                  for f in sorted(os.listdir(os.path.join(ROOT, "apps"))) if f.endswith(".py")]
+        flash += [(p, "/flash/apps/mpy/" + os.path.basename(p)) for p in app_mpys]
     flash += [(p, "/flash/res/" + r) for p, r in tree("res")]
     flash.append((os.path.join(ROOT, "main.py"), "/flash/main.py"))
     if os.path.exists(SECRETS):
@@ -301,11 +319,15 @@ def upload(port, flash, sd, info):
             "  try: os.mkdir(q)\n"
             "  except OSError: pass\n"
             "for d in %r: md(d)\n"
-            # a .py next to a .mpy would win, so the OS folder keeps only .mpy files
-            "for f in os.listdir('/flash/libs/cardos'):\n"
-            " if f.endswith('.py'): os.remove('/flash/libs/cardos/' + f)\n" % dirs)
-    if info["main"] is not None and "cardos" not in info["main"] and not info["backup"]:
-        prep += "import os\nos.rename('/flash/main.py', %r)\n" % BACKUP
+            # a .py next to a .mpy would win, so the library folder keeps only .mpy files
+            "for f in os.listdir(%r):\n"
+            " if f.endswith('.py'): os.remove(%r + f)\n"
+            % (dirs, "/flash/libs/" + LIB, "/flash/libs/%s/" % LIB))
+    if info["main"] is not None and LIB not in info["main"] and not info["backup"]:
+        # keep the old boot setting next to the backup, so --restore can put it back
+        prep += ("import os, esp32\nos.rename('/flash/main.py', %r)\n"
+                 "try: b = esp32.NVS('uiflow').get_u8('boot_option')\nexcept OSError: b = 1\n"
+                 "open(%r, 'w').write(str(b))\n" % (BACKUP, BACKUP_BOOT))
         say("Your old main.py is saved as " + BACKUP)
     # UIFlow2 boot option 0 = run main.py straight away (no UIFlow start menu)
     prep += "import esp32\nn = esp32.NVS('uiflow')\nn.set_u8('boot_option', 0)\nn.commit()\n"
@@ -335,11 +357,30 @@ def restore(port):
                    "import os, esp32\n"
                    "try:\n os.stat(%r)\nexcept OSError:\n print('@@NOBACKUP')\nelse:\n"
                    " os.rename(%r, '/flash/main.py')\n"
-                   " n = esp32.NVS('uiflow'); n.set_u8('boot_option', 1); n.commit()\n"
-                   " print('@@RESTORED')\n" % (BACKUP, BACKUP))
+                   " try:\n  b = int(open(%r).read())\n  os.remove(%r)\n"
+                   " except (OSError, ValueError):\n  b = 1\n"
+                   " n = esp32.NVS('uiflow'); n.set_u8('boot_option', b); n.commit()\n"
+                   " print('@@RESTORED', b)\n" % (BACKUP, BACKUP, BACKUP_BOOT, BACKUP_BOOT))
     if "@@NOBACKUP" in out:
         fail("No backup found (%s). Nothing to restore." % BACKUP)
-    ok("Old main.py restored and UIFlow start menu turned back on")
+    if "@@RESTORED 0" in out:
+        ok("Old main.py restored (it starts on power-up, as before)")
+    else:
+        ok("Old main.py restored and UIFlow start menu turned back on")
+
+
+def ask_wifi(port):
+    """Ask for the WiFi name and password and save them where UIFlow2 keeps them."""
+    import getpass
+    print()
+    say("The Cardputer joins this WiFi on start-up (2.4 GHz networks only).")
+    ssid = input("        WiFi name: ").strip()
+    if not ssid:
+        fail("No WiFi name entered.")
+    pswd = getpass.getpass("        WiFi password (hidden, Enter for none): ")
+    mpremote(port, "exec", "import esp32\nn = esp32.NVS('uiflow')\n"
+                           "n.set_str('ssid0', %r)\nn.set_str('pswd0', %r)\nn.commit()\n" % (ssid, pswd))
+    ok("WiFi saved: " + ssid)
 
 
 def restart(port):
@@ -354,41 +395,58 @@ def reboot(port):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Install CardOS on an M5Stack Cardputer ADV.")
+    ap = argparse.ArgumentParser(description="Install %s on an M5Stack Cardputer ADV." % PRODUCT)
     ap.add_argument("--port", help="serial port, e.g. COM5 or /dev/ttyACM0 (default: auto)")
     ap.add_argument("--check", action="store_true", help="only check the device, change nothing")
+    ap.add_argument("--wifi", action="store_true", help="only change the WiFi name and password")
     ap.add_argument("--no-sd", action="store_true", help="skip the SD card files")
     ap.add_argument("--no-reset", action="store_true", help="don't reboot when done")
-    ap.add_argument("--restore", action="store_true", help="put back the main.py from before CardOS")
+    ap.add_argument("--restore", action="store_true", help="put back the main.py from before %s" % PRODUCT)
     a = ap.parse_args()
 
-    print("\nCardOS installer\n")
+    print("\n%s installer\n" % PRODUCT)
     ensure_tools()
     port = find_port(a.port)
     if a.restore:
         restore(port)
         reboot(port)
         return
-    os_mpys, app_mpys = compile_all()
-    ok("Compiled %d CardOS modules and %d apps" % (len(os_mpys), len(app_mpys)))
-    flash, sd = plan_files(os_mpys, app_mpys, not a.no_sd)
+    if a.wifi:
+        ask_wifi(port)
+        reboot(port)
+        return
+    lib_mpys, app_mpys = compile_all()
+    if HAS_APPS:
+        ok("Compiled %d %s modules and %d apps" % (len(lib_mpys), PRODUCT, len(app_mpys)))
+    else:
+        ok("Compiled %d %s modules" % (len(lib_mpys), PRODUCT))
+    flash, sd = plan_files(lib_mpys, app_mpys, not a.no_sd)
     say("Checking the Cardputer ...")
     info = probe(port)
     # +64 KB headroom for settings, caches and the backup
-    check_device(info, os_mpys + app_mpys, size(flash) + 64 * 1024, size(sd), not a.no_sd)
+    check_device(info, lib_mpys + app_mpys, size(flash) + 64 * 1024, size(sd), not a.no_sd)
     if a.check:
         restart(port)
         print("\nAll checks passed. Run without --check to install.\n")
         return
-    if not os.path.exists(SECRETS):
+    if info["wifi"]:
+        ok("WiFi saved on the Cardputer: " + info["wifi"])
+    # CardOS has a Settings app for WiFi; NPL Cricket on its own needs it set here
+    if not info["wifi"] and not HAS_APPS:
+        ask_wifi(port)
+    if HAS_APPS and not os.path.exists(SECRETS):
         say("No secrets.json: fine, only the Voice Agent app needs a Gemini key")
     upload(port, flash, sd, info)
     if a.no_reset:
-        print("\nDone. Restart the Cardputer to start CardOS.\n")
+        print("\nDone. Restart the Cardputer to start %s.\n" % PRODUCT)
     else:
         reboot(port)
-        print("\nDone! CardOS starts in a few seconds.\n"
-              "Open Settings to connect WiFi, then open NPL Cricket.\n")
+        if HAS_APPS:
+            print("\nDone! CardOS starts in a few seconds.\n"
+                  "Open Settings to connect WiFi, then open NPL Cricket.\n")
+        else:
+            print("\nDone! NPL Cricket starts in a few seconds.\n"
+                  "The first start downloads the season, which takes about a minute.\n")
 
 
 if __name__ == "__main__":
