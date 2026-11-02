@@ -51,6 +51,9 @@ try:
 except OSError:
     r['backup'] = False
 def sd_free():
+    # the card object must outlive this function: if it is garbage-collected
+    # the SD driver shuts down under the mounted card and the board crashes
+    global _cardos_sd
     try:
         os.listdir('/sd')
     except OSError:
@@ -65,6 +68,7 @@ def sd_free():
                 try:
                     c = machine.SDCard(slot=slot, sck=40, miso=39, mosi=14, cs=12, freq=freq)
                     os.mount(c, '/sd')
+                    _cardos_sd = c
                     ok = True
                     break
                 except Exception:
@@ -90,11 +94,16 @@ def ok(msg):
     say(msg, "[ OK ]")
 
 
+_connected = None   # port we have talked to (talking to it pauses whatever it was running)
+
+
 def fail(msg, hint=None):
     say(msg, "[FAIL]")
     if hint:
         for line in hint.strip().splitlines():
             print("        " + line)
+    if _connected:
+        restart(_connected)   # don't leave the Cardputer paused at the Python prompt
     sys.exit(1)
 
 
@@ -137,6 +146,9 @@ def mpremote(port, *args, check=True):
     r = subprocess.run(cmd, env=env(), capture_output=True, text=True,
                        encoding="utf-8", errors="replace")
     out = r.stdout + r.stderr
+    global _connected
+    if r.returncode == 0:
+        _connected = port
     if check and r.returncode:
         fail("mpremote failed:\n" + out.strip()[-800:],
              "Unplug and replug the Cardputer, close anything else using the port\n"
@@ -330,8 +342,14 @@ def restore(port):
     ok("Old main.py restored and UIFlow start menu turned back on")
 
 
+def restart(port):
+    # the USB link drops as the board resets, so an error here is expected
+    subprocess.run([sys.executable, "-m", "mpremote", "connect", port, "resume", "exec",
+                    "import machine; machine.reset()"], env=env(), capture_output=True)
+
+
 def reboot(port):
-    mpremote(port, "exec", "import machine; machine.reset()", check=False)
+    restart(port)
     ok("Rebooting the Cardputer")
 
 
@@ -359,6 +377,7 @@ def main():
     # +64 KB headroom for settings, caches and the backup
     check_device(info, os_mpys + app_mpys, size(flash) + 64 * 1024, size(sd), not a.no_sd)
     if a.check:
+        restart(port)
         print("\nAll checks passed. Run without --check to install.\n")
         return
     if not os.path.exists(SECRETS):
